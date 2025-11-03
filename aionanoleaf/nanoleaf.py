@@ -21,7 +21,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import socket
 from typing import Any, Callable
 
 from aiohttp import (
@@ -35,10 +34,7 @@ from aiohttp import (
 
 from .events import (
     EffectsEvent,
-    LayoutEvent,
     StateEvent,
-    TouchEvent,
-    TouchStreamEvent,
 )
 
 from .exceptions import (
@@ -49,7 +45,6 @@ from .exceptions import (
     Unauthorized,
     Unavailable,
 )
-from .layout import Panel
 from .typing import InfoData
 
 _LOGGER = logging.getLogger(__name__)
@@ -210,11 +205,6 @@ class Nanoleaf:
         return self.effect if self.effect in self.effects_list else None
 
     @property
-    def panels(self) -> set[Panel]:
-        """Return a list of all panels."""
-        return self._panels
-
-    @property
     def _api_url(self) -> str:
         return f"http://{self.host}:{self.port}/api/v1"
 
@@ -305,7 +295,6 @@ class Nanoleaf:
         self._color_mode = data["state"]["colorMode"]
         self._effects_list = data["effects"]["effectsList"]
         self._effect = data["effects"]["select"]
-        self._panels = {Panel(panel) for panel in data["panelLayout"]["layout"]["positionData"]}
 
     async def set_state(
         self,
@@ -401,52 +390,21 @@ class Nanoleaf:
         """Identify the Nanoleaf."""
         await self._request("put", "identify")
 
-    async def _open_websocket_for_touch_data_stream(
-        self,
-        callback: Callable,
-        local_ip: str | None = None,
-        local_port: int | None = None,
-    ) -> int:
-        if local_ip is None:
-            local_ip = "0.0.0.0"
-        if local_port is None:
-            local_port = 0
-        loop = asyncio.get_running_loop()
-        transport, protocol = await loop.create_datagram_endpoint(
-            lambda: _NanoleafTouchProtocol(self.host, callback),
-            local_addr=(local_ip, local_port),
-        )
-        touch_socket: socket.socket = transport.get_extra_info("socket")
-        socket_port = touch_socket.getsockname()[1]
-        if socket_port is None:
-            raise NanoleafException("Could not determine port of socket")
-        return socket_port
-
     async def _listen_for_server_sent_events(
         self,
         state_callback: Callable[[StateEvent], Any] | None = None,
-        layout_callback: Callable[[LayoutEvent], Any] | None = None,
         effects_callback: Callable[[EffectsEvent], Any] | None = None,
-        touch_callback: Callable[[TouchEvent], Any] | None = None,
-        socket_port: int | None = None,
     ) -> None:
         """Listen to events, apply changes to object and call callback with event."""
         request_url = (
             f"{self._api_url}/{self.auth_token}/events?"
             f"id={StateEvent.EVENT_TYPE_ID},{EffectsEvent.EVENT_TYPE_ID}"
         )
-        if layout_callback is not None:
-            request_url += f",{LayoutEvent.EVENT_TYPE_ID}"
-        if touch_callback is not None or socket_port is not None:
-            request_url += f",{TouchEvent.EVENT_TYPE_ID}"
-        request_headers = None
-        if socket_port is not None:
-            request_headers = {"TouchEventsPort": str(socket_port)}
         request_timeout = ClientTimeout(total=None, sock_connect=5, sock_read=None)
         while True:
             try:
                 async with self._session.get(
-                    request_url, headers=request_headers, timeout=request_timeout
+                    request_url, timeout=request_timeout
                 ) as resp:
                     while True:
                         id_line = await resp.content.readline()
@@ -462,19 +420,11 @@ class Nanoleaf:
                                 setattr(self, f"_{event.attribute}", event.value)
                                 if state_callback is not None:
                                     asyncio.create_task(state_callback(event))
-                            elif event_type_id == LayoutEvent.EVENT_TYPE_ID:
-                                layout_event = LayoutEvent(event_data)
-                                if layout_callback is not None:
-                                    asyncio.create_task(layout_callback(layout_event))
                             elif event_type_id == EffectsEvent.EVENT_TYPE_ID:
                                 effects_event = EffectsEvent(event_data)
                                 self._effect = effects_event.effect
                                 if effects_callback is not None:
                                     asyncio.create_task(effects_callback(effects_event))
-                            elif event_type_id == TouchEvent.EVENT_TYPE_ID:
-                                touch_event = TouchEvent(event_data)
-                                if touch_callback is not None:
-                                    asyncio.create_task(touch_callback(touch_event))
                             else:
                                 raise NanoleafException(
                                     f"Unknown event type id {event_type_id}"
@@ -485,54 +435,10 @@ class Nanoleaf:
     async def listen_events(
         self,
         state_callback: Callable[[StateEvent], Any] | None = None,
-        layout_callback: Callable[[LayoutEvent], Any] | None = None,
         effects_callback: Callable[[EffectsEvent], Any] | None = None,
-        touch_callback: Callable[[TouchEvent], Any] | None = None,
-        touch_stream_callback: Callable[[Any], Any] | None = None,
-        *,
-        local_ip: str | None = None,
-        local_port: int | None = None,
     ) -> None:
         """Listen to Nanoleaf events."""
-        socket_port: int | None = None
-        if touch_stream_callback is not None:
-            socket_port = await self._open_websocket_for_touch_data_stream(
-                touch_stream_callback, local_ip, local_port
-            )
-            _LOGGER.debug("Listening for UDP touch events on socket port: %s", socket_port)
         await self._listen_for_server_sent_events(
             state_callback,
-            layout_callback,
             effects_callback,
-            touch_callback,
-            socket_port,
         )
-
-
-class _NanoleafTouchProtocol(asyncio.DatagramProtocol):
-    """Nanoleaf touch protocol."""
-
-    def __init__(
-        self, nanoleaf_host: str, callback: Callable[[TouchStreamEvent], Any]
-    ) -> None:
-        """Init Nanoleaf UDP socket touch protocol."""
-        self._nanoleaf_host = nanoleaf_host
-        self._callback = callback
-
-    def connection_made(self, transport: asyncio.BaseTransport) -> None:
-        """Set transport for connection."""
-        self.transport = transport
-
-    def datagram_received(self, data: bytes, addr: Any) -> None:
-        """Receive touch events."""
-        if addr[0] != self._nanoleaf_host:
-            return
-        binary = bin(int.from_bytes(data, byteorder="big"))
-        binary = binary[3:]  # Remove 0b1
-        event = TouchStreamEvent(
-            panel_id=int(binary[:16], 2),  # First 2 bytes
-            touch_type_id=int(binary[16:20], 2),  # Nibble after panel id
-            strength=int(binary[20:24], 2),  # Nibble after touch type
-            panel_id_2=int(binary[24:], 2),
-        )
-        asyncio.create_task(self._callback(event))

@@ -35,31 +35,6 @@ class ValueWithRange(TypedDict):
     min: int
 
 
-class PositionData(TypedDict):
-    """Nanoleaf API position data."""
-
-    panelId: int
-    x: int
-    y: int
-    o: int
-    shapeType: int
-
-
-class LayoutData(TypedDict):
-    """Nanoleaf API layout data."""
-
-    numPanels: int
-    sideLength: int
-    positionData: list[PositionData]
-
-
-class PanelLayoutData(TypedDict):
-    """Nanoleaf panel layout."""
-
-    layout: LayoutData
-    globalOrientation: ValueWithRange
-
-
 class StateData(TypedDict):
     """Nanoleaf API state."""
 
@@ -89,7 +64,6 @@ class InfoData(TypedDict):
     model: str
     state: StateData
     effects: EffectsData
-    panelLayout: PanelLayoutData
 
 
 class CanvasInfoData(InfoData):
@@ -111,21 +85,8 @@ class StateEventData(TypedDict):
     value: str | int
 
 
-class LayoutEventData(TypedDict):
-    """Nanoleaf API Layout event data."""
-
-    attr: int
-
-
 class EffectsEventData(TypedDict):
     """Nanoleaf API Effects event data."""
 
     attr: int
     value: str
-
-
-class TouchEventData(TypedDict):
-    """Nanoleaf API Touch event data."""
-
-    gesture: int
-    panelId: int
